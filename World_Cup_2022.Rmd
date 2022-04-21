@@ -9,7 +9,7 @@ output:
 editor_options: 
   chunk_output_type: console
 params:
-  match_truncate: 20
+  match_truncate: null
 ---
 
 <style>.page-inner {max-width: 1200px !important;} </style>
@@ -479,3 +479,39 @@ if (nrow(unplayed_matches) > 0) {
     reactable()
 }
 ```
+
+# Map
+
+```{r}
+world = map_data("world") %>% 
+  as_tibble() %>%
+  mutate(region = case_when(region == "UK" ~ subregion, T ~region)) %>%
+  mutate(region = case_when(region == "Great Britain" ~ "England", T ~ region)) %>%
+  filter(region %in% teams$team) %>%
+  left_join(
+    played_matches %>% 
+      group_by(winner) %>% 
+      summarise(wins = n()) %>% 
+      filter(winner != 'tie'), by=c("region" = "winner")) %>%
+  mutate(wins = case_when(is.na(wins) ~ 0L, T ~ wins))
+
+stopifnot(identical(
+  world$region %>% uq() %>% sort(),
+teams$team %>% sort()
+))
+
+world_name_labels = world %>%
+  group_by(region) %>%
+  summarise(long = mean(long), lat = mean(lat))
+
+ggplot(world) +
+  aes(x=long, y=lat) +
+  geom_polygon(aes(group=group, color=region, fill=wins)) +
+  geom_text(aes(label=region), data=world_name_labels, size=2, hjust=.5) +
+  scale_fill_gradient2(low = "white", high=muted("green")) +
+  guides(color=F) +
+  labs(x="longitude", y="latitude", fill="# of Wins") + 
+  theme_void() +
+  theme(panel.background = element_rect(color = "deepskyblue3", size = 1))
+```
+
