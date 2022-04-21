@@ -1,0 +1,481 @@
+---
+title: "Euro Cup 2021"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::robobook:
+    highlight: kate
+    number_sections: yes
+    self_contained: true
+editor_options: 
+  chunk_output_type: console
+params:
+  match_truncate: 20
+---
+
+<style>.page-inner {max-width: 1200px !important;} </style>
+
+![](data/eurologo.png)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = F, echo=F, results='asis', warning=F, message=F)
+source(histerr::basic(browser_warn = T, set_ggtheme = T))
+library(sparkline)
+library(htmltools)
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+teams = readxl::read_excel("data/teams.xlsx") # ranking based on https://www.fifa.com/fifa-world-ranking/men?dateId=id13295
+source("setup.R")
+
+if (file.exists("data/last_match.txt")) last_match = read_lines("data/last_match.txt") %>% as.integer() else last_match = 0
+```
+
+```{r}
+if (!file.exists("data/round1.Rds")) {
+  round1 = tibble()
+  walk(players$player_id, function(player_id) {
+    round1 <<- bind_rows(round1,
+      bind_cols(
+        readxl::read_excel("submissions/Round_1/" %,% player_id %,% ".xlsx", range = "D7:D43"),
+        readxl::read_excel("submissions/Round_1/" %,% player_id %,% ".xlsx", range = "G7:G43"),
+        readxl::read_excel("submissions/Round_1/" %,% player_id %,% ".xlsx", range = "J7:J43")
+      ) %>%
+        setNames(c('team1_pred', 'winner_pred', 'team2_pred')) %>%
+        mutate(
+          player_id = player_id,
+          match_id = row_number(), .before=1)
+    )
+  })
+  saveRDS(round1, "data/round1.Rds")
+}
+```
+
+```{r, eval=F}
+if (!file.exists("data/round2.Rds")) {
+  if (dir.exists("submissions/Round_2")) {
+    round2 = tibble(
+      player_id = numeric(), 
+      match_id = numeric(),
+      team1_pred = character(),
+      winner_pred = character(),
+      team2_pred = character()
+    )
+    
+    if (dir.exists("submissions/Round_2/")) {
+      walk(players$player_id, function(player_id) {
+        m = readxl::read_excel("submissions/Round_2/" %,% player_id %,% ".xlsx") %>% as.matrix()
+        sapply(37:51, function(x) {
+          round2[nrow(round2) + 1, 'player_id'] <<- player_id
+          round2[nrow(round2), 'match_id'] <<- x
+          round2[nrow(round2), 'team1_pred'] <<- m[which(m==x) + 1]
+          round2[nrow(round2), 'team2_pred'] <<- m[which(m==x) + 2]
+          round2[nrow(round2), 'winner_pred'] <<- if_else(
+            m[[which(m == x, T)[1] + 1, which(m == x, T)[2] +1]] == 'WIN',
+            m[[which(m == x, T)[1] + 1, which(m == x, T)[2]]],
+            m[[which(m == x, T)[1] + 2, which(m == x, T)[2]]]
+          )
+        })
+      })
+    }
+  } else round2 = matches %>% filter(round > 1) %>% select(match_id) %>% unique() %>% crossing(players %>% select(player_id)) %>% mutate(team1_pred = NA_character_, winner_pred = NA_character_,   team2_pred = NA_character_, loser_pred = NA_character_)
+}
+
+saveRDS(round2, "data/round2.Rds")
+```
+
+```{r}
+predictions = bind_rows(readRDS("data/round1.Rds"), readRDS("data/round2.Rds")) %>%
+  arrange(player_id, match_id) %>%
+  mutate_if(is.numeric, as.integer) %>%
+  mutate(loser_pred = case_when(winner_pred == "tie" ~ "tie", T ~ case_when(winner_pred == team1_pred ~ team2_pred, T ~ team1_pred))) %>%
+  mutate_at(c("winner_pred", "loser_pred"), as.character) 
+
+  # THIS PART IS FOR WHEN YOU PICK SCORES, NOT WINNERS -- SHOULD BE FIXED UP BUT WE'LL LEAVE IT AS IS FOR NOW
+
+  #left_join(matches %>% select(match_id, round))
+  # mutate(winner_pred = case_when(
+  #   round == 1L & score1_pred > score2_pred ~ team1_pred,
+  #   round == 1L & score1_pred == score2_pred ~ "tie",
+  #   round == 1L & score1_pred < score2_pred ~ team2_pred,
+  #   T ~ winner_pred)) %>%
+  # mutate(loser_pred = case_when(
+  #   round == 1L & score1_pred > score2_pred ~ team2_pred,
+  #   round == 1L & score1_pred == score2_pred ~ "tie",
+  #   round == 1L & score1_pred < score2_pred ~ team1_pred,
+  #   T ~ winner_pred)
+
+
+if (matches %>% filter(round > 1) %>% select(team1, team2) %>% stack() %>% pull(values) %>% is.na() %>% all()) teams_left = c(matches$team1, matches$team2) %>% na.omit() %>% unique() else teams_left = setdiff( append(matches %>% filter(round > 1) %>% pull(team1), matches %>% filter(round > 1) %>% pull(team2)) %>% unique(), matches %>% filter(round > 1) %>% pull(loser))
+
+
+# STOP IF NOTS
+
+stopifnot(identical(unique(predictions$player_id), unique(players$player_id))) # are the player IDs the same?
+
+stopifnot(predictions %>% group_by(match_id) %>% summarise(n = n()) %>% pull(n) %>% unique() == length(players$player_id)) # does each match have the correct number of predictions?
+
+stopifnot(c(predictions$team1_pred, predictions$team2_pred, predictions$winner_pred, predictions$loser_pred) %>% unique() %>% setdiff("tie") %>% match(teams$team) %>% is.na() %>% sum() == 0) # can we match every prediction to a team (except "tie")? 
+```
+
+```{r}
+# For testing purposes only: go back in time
+start_of_round_2 = matches %>% filter(round == 2) %>% pull(match_id) %>% min()
+
+if (!is.null(params$match_truncate)) {
+  if (params$match_truncate < start_of_round_2) {
+  matches = matches %>% 
+    mutate_at(c("team1", "team2"), ~case_when(round > 1 ~ NA_character_, T ~ .)) %>%
+    mutate_at(c("winner", "loser"), ~case_when(match_id > params$match_truncate ~ NA_character_, T ~ .)) %>% mutate_at(c("score1", "score2"), ~case_when(match_id > params$match_truncate ~ NA_integer_, T ~ .))
+  predictions = predictions %>%
+    mutate_at(c("team1_pred", "winner_pred", "team2_pred", "loser_pred"), ~case_when(match_id >= start_of_round_2 ~ NA_character_, T ~.))
+  } else {
+    matches = matches %>% 
+      mutate_at(c("winner", "loser"), ~case_when(match_id > params$match_truncate ~ NA_character_, T ~ .)) %>% mutate_at(c("score1", "score2"), ~case_when(match_id > params$match_truncate ~ NA_integer_, T ~ .))
+  }
+}
+
+played_matches = matches %>% filter(!is.na(score1))
+unplayed_matches = matches %>% anti_join(played_matches)
+```
+
+# Standings
+
+```{r}
+standings = matches %>% 
+  left_join(predictions, by="match_id") %>%
+  
+  # ONCE AGAIN THIS IS FOR SCORE PREDICTING IN ROUND 1
+  #na.omit() %>%
+  # mutate(points = case_when(
+  #   round == 1L ~ 
+  #     case_when(
+  #       score1_pred == score1 & score2_pred == score2 ~ 3L,
+  #       score1_pred - score1 == score2_pred - score2 ~ 2L,
+  #       winner_pred == winner ~ 1L,
+  #       T ~ 0L
+  #       ),
+  #   T ~ NA_integer_
+  #   )) %>%
+
+  mutate(points = case_when(is.na(score1) ~ NA_integer_, winner == winner_pred ~ 1L, T ~ 0L)) %>%
+  mutate(points = points * points_available) %>%
+  group_by(player_id) %>%
+  arrange(player_id, match_id) %>%
+  mutate(max_future_points = case_when(
+    round == 1 ~ points_available,
+    !is.na(score1) ~ 0L,
+    is.na(winner_pred) ~ points_available,
+    winner_pred %in% teams_left ~ points_available, 
+    T ~ 0L)) %>%
+  mutate(total_points = cumsum(points)) %>% 
+  mutate(max_past_points = case_when(is.na(points) ~ points_available, T ~ points)) %>%
+  mutate(max_points = cumsum(max_past_points)) %>%
+  mutate(successes = cumsum(points > 0)) %>%
+  mutate(failures = cumsum(points == 0)) %>%
+  mutate(mu_beta = (successes + 1) / (successes + failures + 2)) %>%
+  arrange(player_id, desc(match_id)) %>%
+  mutate(max_points = max_points + cumsum(max_future_points) - max_future_points) %>%
+  arrange(player_id, match_id) %>%
+  group_by(match_id) %>%
+  mutate(rank = dense_rank(desc(total_points))) %>%
+  ungroup() %>%
+  mutate(success_perc = successes / (successes + failures)) %>%
+  arrange(player_id, match_id)
+  
+
+#stopifnot(nrow(standings) == nrow(matches) * nrow(players))
+
+if (exists("last_match")) {
+  standings = left_join(
+    standings,
+      filter(standings, match_id == last_match) %>% 
+        mutate(last_rank = rank) %>% 
+        select(player_id, last_rank)
+    , by="player_id"
+  ) %>% 
+    mutate(rank_change = last_rank - rank)
+} else { 
+  standings = standings %>% mutate(rank_change = NA)
+}
+
+standings_tbl = standings %>%
+  filter(!is.na(score1)) %>%
+  arrange(player_id, match_id) %>%
+  group_by(player_id) %>%
+  slice_tail() %>%
+  ungroup() %>%
+  left_join(players, by="player_id") %>%
+  mutate(exp_points = ((successes + 1) / (successes + failures + 2) * (max_points - total_points)) + total_points) %>%
+  select(rank, player_id, nickname, total_points, max_points, exp_points, rank_change, success_perc, successes, failures) %>%
+  mutate(sparkline = NA, .before="success_perc") %>%
+  arrange(rank, nickname)
+
+standings_tbl %>%
+  reactable(
+    defaultPageSize = 20, fullWidth = T, defaultExpanded = F, filterable = F, searchable = T, highlight = T,  bordered = T, onClick = "expand",
+    rowStyle = list(cursor = "pointer"),
+    columns = list(
+      rank = colDef(show = F),
+      player_id = colDef(show = F),
+      successes = colDef(show = F),
+      failures = colDef(show = F),
+      nickname = colDef(
+        name = "player",
+        minWidth = 400,
+        cell = function(value, index) {
+          #browser()
+          text = as.character(standings_tbl[[index, 'rank']]) %,% "." %,,% value %,% " "
+          champ = predictions %>% filter(player_id == standings_tbl[[index, 'player_id']], match_id == max(matches$match_id)) %>% pull(winner_pred)
+          if (is.na(champ) | length(champ) == 0) return(text)
+          flag = ifelse(champ %in% names(flags), flags[champ], tolower(substr(champ, 1, 2)))
+          flag_url = "https://cdn.jsdelivr.net/gh/lipis/flag-icon-css@master/flags/4x3/" %,% flag %,% ".svg"
+          image = img(src = flag_url, height = "24px", alt = flag)
+          tagList(
+            div(style = list(display = "inline-block", width = "25px", margin = "0px 20px 0px 0px"), image),
+            text
+          )
+        }
+      ),
+      total_points = colDef(
+        name = "total points",
+        width = 100,
+        style = function(value, index) {
+          if (length(unique(standings_tbl$rank)) == 1) return()
+          color_palette = function(x) rgb(colorRamp(c("#89cff0", "#D2F3FF"))(x), maxColorValue = 255)
+          normalized = (standings_tbl[[index, 'rank']] - min(standings_tbl[['rank']])) / (max(standings_tbl[['rank']]) - min(standings_tbl[['rank']]))
+          color = color_palette(normalized)
+          list(background = color)
+        },
+      ),
+      max_points = colDef(
+        name = "maximum possible points",
+        width = 100,
+      ),
+      exp_points = colDef(
+        name = "expected points",
+        width = 100,
+        format = colFormat(digits = 0)
+      ),
+      rank_change = colDef(
+        name = "rank change",
+        width = 100,
+        cell = function(value) {
+          if (is.na(value)) return()
+          if (value > 0) return(div(shiny::icon("arrow-up"), " ", value))
+          if (value < 0) return(div(shiny::icon("arrow-down"), " ", abs(value)))
+          if (value == 0) return(div(shiny::icon("arrow-right")))
+        },
+        style = function(value) {
+          color = if_else(value > 0, "#008000", if_else(value == 0, "orange", "#e00000"))
+          list(fontWeight = 600, color=color)
+        }
+      ),
+      sparkline = colDef(
+        name = "points chart",
+        width = 100,
+        cell = function(value, index) standings %>% filter(player_id == standings_tbl[[index, 'player_id']]) %>% pull(total_points) %>% na.omit() %>% sparkline(chartRangeMin=0, chartRangeMax=max(standings$total_points))
+      ),
+      success_perc = colDef(
+        name = "% successful predictions",
+        format = colFormat(percent=T, digits = 0),
+        width = 100
+      )
+    ),
+    details = function(index) {
+      if (!exists("last_match")) return()
+      colors = players %>% mutate(color = case_when(player_id == standings_tbl[[index, 'player_id']] ~ "#000000", T ~ hue_pal()(nrow(players))[player_id])) %>% select(short_name, color) %>% deframe()
+      g = standings %>% 
+        filter(!is.na(score1)) %>%
+        left_join(players, by="player_id") %>%
+        mutate(you = player_id == standings_tbl[[index, 'player_id']]) %>%
+        #mutate(short_name = reorder(you)) %>%
+        ggplot() +
+        theme_histerr(16) +
+        aes(x=match_id, y=total_points, color=short_name, alpha=you, lty=you, size=you) +
+        geom_line() +
+        scale_linetype_manual(values=c("dotted", "solid")) +
+        scale_alpha_manual(values=c(.9, 1)) +
+        scale_size_manual(values=c(.7,2)) +
+        scale_color_manual(values=colors) +
+        guides(alpha='none', size='none', linetype='none') +
+        labs(color='Player') +
+        theme(legend.position = 'right') +
+        labs(x="match #") +
+        scale_x_continuous(breaks = standings %>% filter(!is.na(score1)) %>% pull(match_id) %>% unique())
+      
+      g2 = standings_tbl %>%
+        inner_join(players, by=c("player_id", "nickname")) %>%
+        mutate(you = player_id == standings_tbl[[index, 'player_id']]) %>%
+        mutate(
+          `2.5%` = qbeta(.025, successes + 1, failures + 1),
+          `50%` = qbeta(.5, successes + 1, failures + 1),
+          `97.5%` = qbeta(.975, successes + 1, failures + 1)
+          ) %>%
+        arrange(`50%`) %>%
+        ggplot() +
+        theme_histerr(16) +
+        aes(y=reorder(short_name, `50%`), x=`50%`) +
+        geom_errorbar(aes(xmin = `2.5%`, xmax = `97.5%`, size=you)) +
+        geom_point(color='red', size=3) +
+        geom_vline(xintercept = .5, color='purple') +
+        scale_size_manual(values=c(.5,1.5)) +
+        labs(y = "player", x = "prob of success (95% error bars)", size=NULL) +
+        guides(size='none')
+      
+      div(style = list(margin = "12px 45px"),
+        h3("Played Matches"),
+        div(
+          standings %>% 
+            filter(
+              !is.na(score1),
+              player_id == standings_tbl[[index, 'player_id']]) %>% 
+            mutate(
+              round, 
+              match_id, 
+              match = team1 %,,% score1 %,,% "-" %,,% score2 %,,% team2, 
+              #prediction = team1_pred %,,% score1_pred %,,% "-" %,,% score2_pred %,,% team2_pred,
+              prediction = winner_pred,
+              points,
+              total_points,
+              .keep='none') %>%
+            reactable(fullWidth = F, bordered = T, columns = list(match = colDef(minWidth = 200), prediction = colDef(minWidth = 200, name = "your prediction")))
+          ),
+        h3("Upcoming Matches"),
+        div(
+          standings %>% 
+            filter(
+              is.na(score1),
+              player_id == standings_tbl[[index, 'player_id']]) %>%
+            mutate(
+              round, 
+              match_id, 
+              match = if_else(is.na(team1), NA_character_, team1 %,,% "-" %,,% team2), 
+              #prediction = if_else(is.na(team1_pred), NA_character_, team1_pred %,,% score1_pred %,,% "-" %,,% score2_pred %,,% team2_pred
+              prediction = if_else(is.na(team1_pred), NA_character_, team1_pred
+              ),.keep='none') %>%
+            reactable(fullWidth = F, bordered = T, columns = list(match = colDef(minWidth = 200), prediction = colDef(minWidth = 200, name = "your prediction")))
+          ),
+        h3("Graph"),
+        div(plotTag(g, alt='plot', width = 800)),
+        h3("Player Rankings"),
+        div(plotTag(g2, alt='plot', width = 800))
+      )
+    }
+  )
+
+write_lines(
+  x = standings %>% filter(!is.na(score1)) %>% pull(match_id) %>% max(),
+  file = "data/last_match.txt"
+)
+```
+
+# Bayesian Model
+
+## Team Rankings
+
+```{r, eval=T}
+stan_model = "
+data {
+  int nteams;
+  int ngames;
+  vector[nteams] prior_rank;
+  int team1[ngames];
+  int team2[ngames];
+  vector[ngames] score1;
+  vector[ngames] score2;
+  real df;
+}
+transformed data {
+  vector[ngames] dif;
+  vector[ngames] sqrt_dif;
+  dif = score1 - score2;
+  for (i in 1:ngames)
+    sqrt_dif[i] = (step(dif[i]) - .5)*sqrt(fabs(dif[i]));
+}
+parameters {
+  real b;
+  real sigma_a;
+  real sigma_y;
+  vector[nteams] eta_a;
+}
+transformed parameters {
+  vector[nteams] a;
+  a = b*prior_rank + sigma_a*eta_a;
+}
+model {
+  eta_a ~ normal(0, 1);
+  for (i in 1:ngames)
+    sqrt_dif[i] ~ student_t(df, a[team1[i]] - a[team2[i]], sigma_y);
+}
+"
+
+stan_fit = stan(
+  model_code = stan_model,
+  data = list(
+    played_matches = played_matches,
+    nteams = nrow(teams),
+    ngames = nrow(played_matches),
+    prior_rank = (teams$rank - mean(teams$rank)) / sd(teams$rank) / 2,
+    team1 = match(played_matches$team1, teams$team),
+    team2 = match(played_matches$team2, teams$team),
+    score1 = played_matches$score1,
+    score2 = played_matches$score2,
+    df = 7
+  )
+)
+
+summary(stan_fit)$summary %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column() %>%
+  filter(grepl("^a\\[[0-9]+\\]", rowname)) %>%
+  mutate(team = teams$team, .before=1) %>%
+  ggplot(aes(y=reorder(team, `50%`), x=mean)) +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd)) +
+  geom_point(colour = "red", size=3) +
+  geom_vline(xintercept = 0, color='purple') +
+  labs(x="rank", y=NULL)
+```
+
+## Upcoming Matches
+
+```{r}
+stan_teams = extract(stan_fit)$a %>%
+  as_tibble() %>%
+  setNames(teams$team) %>% 
+  mutate_all(function(x) sign(x) * x^2)
+
+if (nrow(unplayed_matches) > 0) {
+  bayes = unplayed_matches %>% 
+    ungroup() %>%
+    select(round, match_id, points_available, team1, team2) %>%
+    nest_by(round, match_id, points_available, team1, team2) %>%
+    select(-data)
+    
+  bayes$bayes = map2(.x = bayes$team1, .y = bayes$team2, .f = function(x,y) {
+    if (is.na(x) | is.na(y)) return(NULL)
+    team1 = stan_teams[x]
+    team2 = stan_teams[y]
+    d = round(team1 - team2, 1)
+    w = case_when(d > 0 ~ x, d < 0 ~ y, T ~ "tie")
+    b = table(w) / length(w)
+    as_tibble(b) %>% setNames(c("team", "prob"))
+  })
+  
+  bayes = bayes %>%
+    mutate(`Prob. team 1 wins` = ifelse(is.null(bayes), NA, filter(bayes, team==team1) %>% pull(prob) %>% round(., 2))) %>%
+    mutate(`Prob. team 2 wins` = ifelse(is.null(bayes), NA, filter(bayes, team==team2) %>% pull(prob) %>% round(., 2))) %>%
+    mutate(`Prob. tie` = ifelse(is.null(bayes), NA, filter(bayes, team=="tie") %>% pull(prob) %>% round(., 2))) %>%
+    select(-bayes)
+  
+  bayes %>%
+    ungroup() %>%
+    na.omit() %>%
+    mutate(game = team1 %,,% "vs." %,,% team2, .after='points_available') %>%
+    select(-c(team1, team2)) %>%
+    reactable()
+} else {
+  unplayed_matches %>% 
+    select(round, match_id, points_available, team1, team2) %>%
+    reactable()
+}
+```
