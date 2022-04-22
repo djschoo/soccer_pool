@@ -18,16 +18,46 @@ params:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(cache = F, echo=F, results='asis', warning=F, message=F)
-source(histerr::basic(browser_warn = T, set_ggtheme = T))
+#source(histerr::basic(browser_warn = T, set_ggtheme = T))
 library(sparkline)
 library(htmltools)
 library(rstan)
+library(tidyverse)
+library(reactable)
 options(mc.cores = parallel::detectCores())
 rstan_options(auto_write = TRUE)
 teams = readxl::read_excel("data/teams.xlsx") # ranking based on https://www.fifa.com/fifa-world-ranking/men?dateId=id13295
 source("setup.R")
 
 if (file.exists("data/last_match.txt")) last_match = read_lines("data/last_match.txt") %>% as.integer() else last_match = 0
+
+`%,,%` = function(a,b) paste(a,b)
+`%,%` = function(a,b) paste0(a,b)
+theme_gg = function(base_size = 12, base_family='sans') {
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      # L'ensemble de la figure
+      plot.title = element_text(size = rel(1), face = "bold", margin = margin(0,0,5,0), hjust = 0),
+      # Zone où se situe le graphique
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      # Les axes
+      axis.title = element_text(size = rel(0.85), face = "bold"),
+      axis.text = element_text(size = rel(0.70), face = "bold"),
+      axis.text.x = element_text(angle=45, hjust = 1),
+      axis.line = element_line(color = "black", arrow = arrow(length = unit(0.3, "lines"), type = "closed")),
+      # La légende
+      legend.title = element_text(size = rel(0.85), face = "bold"),
+      legend.text = element_text(size = rel(0.70), face = "bold"),
+      legend.key = element_rect(fill = "transparent", colour = NA),
+      legend.key.size = unit(1.5, "lines"),
+      legend.background = element_rect(fill = "transparent", colour = NA),
+      legend.position="bottom",
+      # Les étiquettes dans le cas d'un facetting
+      #strip.background = element_rect(fill = "#17252D", color = "#17252D"),
+      strip.background = element_rect(fill = "#8b9296", color = "#8b9296"),
+      strip.text = element_text(size = rel(0.85), face = "bold", color = "white", margin = margin(2,0,2,0))
+)}
 ```
 
 ```{r}
@@ -283,14 +313,14 @@ standings_tbl %>%
     ),
     details = function(index) {
       if (!exists("last_match")) return()
-      colors = players %>% mutate(color = case_when(player_id == standings_tbl[[index, 'player_id']] ~ "#000000", T ~ hue_pal()(nrow(players))[player_id])) %>% select(short_name, color) %>% deframe()
+      colors = players %>% mutate(color = case_when(player_id == standings_tbl[[index, 'player_id']] ~ "#000000", T ~ scales::hue_pal()(nrow(players))[player_id])) %>% select(short_name, color) %>% deframe()
       g = standings %>% 
         filter(!is.na(score1)) %>%
         left_join(players, by="player_id") %>%
         mutate(you = player_id == standings_tbl[[index, 'player_id']]) %>%
         #mutate(short_name = reorder(you)) %>%
         ggplot() +
-        theme_histerr(16) +
+        theme_gg(16) +
         aes(x=match_id, y=total_points, color=short_name, alpha=you, lty=you, size=you) +
         geom_line() +
         scale_linetype_manual(values=c("dotted", "solid")) +
@@ -313,7 +343,7 @@ standings_tbl %>%
           ) %>%
         arrange(`50%`) %>%
         ggplot() +
-        theme_histerr(16) +
+        theme_gg(16) +
         aes(y=reorder(short_name, `50%`), x=`50%`) +
         geom_errorbar(aes(xmin = `2.5%`, xmax = `97.5%`, size=you)) +
         geom_point(color='red', size=3) +
@@ -496,7 +526,7 @@ world = map_data("world") %>%
   mutate(wins = case_when(is.na(wins) ~ 0L, T ~ wins))
 
 stopifnot(identical(
-  world$region %>% uq() %>% sort(),
+  world$region %>% unique() %>% sort(),
 teams$team %>% sort()
 ))
 
@@ -508,8 +538,8 @@ ggplot(world) +
   aes(x=long, y=lat) +
   geom_polygon(aes(group=group, color=region, fill=wins)) +
   geom_text(aes(label=region), data=world_name_labels, size=2, hjust=.5) +
-  scale_fill_gradient2(low = "white", high=muted("green")) +
-  guides(color=F) +
+  scale_fill_gradient2(low = "white", high=scales::muted("green")) +
+  guides(color='none') +
   labs(x="longitude", y="latitude", fill="# of Wins") + 
   theme_void() +
   theme(panel.background = element_rect(color = "deepskyblue3", size = 1))

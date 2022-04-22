@@ -92,7 +92,7 @@ matches = rounds %>%
   arrange(match_id)
 
 teams = teams %>%
-  filter(team %in% c(matches$team1, matches$teams2)) %>%
+  filter(team %in% c(matches$team1, matches$team2)) %>%
   mutate(team_id = row_number())
 
 stopifnot(length(unique(matches$match_id - lag(matches$match_id))) == 2) # every match should increment by one (except for first row)
